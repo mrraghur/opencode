@@ -96,12 +96,13 @@ const configLayer = (
     auth?: Layer.Layer<Auth.Service>
     account?: Layer.Layer<Account.Service>
     client?: HttpClient.HttpClient
+    npm?: Layer.Layer<Npm.Service>
   } = {},
 ) =>
   LayerNode.compile(LayerNode.group([Config.node, FSUtil.node, Env.node, CrossSpawnSpawner.node]), [
     [Auth.node, options.auth ?? AuthTest.empty],
     [Account.node, options.account ?? AccountTest.empty],
-    [Npm.node, NpmTest.noop],
+    [Npm.node, options.npm ?? NpmTest.noop],
     [httpClient, Layer.succeed(HttpClient.HttpClient, options.client ?? unexpectedHttp)],
   ])
 
@@ -109,6 +110,12 @@ const layer = configLayer()
 
 const it = testEffect(layer)
 const configIt = (options?: Parameters<typeof configLayer>[0]) => testEffect(configLayer(options))
+const dependencyInstallDirs: string[] = []
+const dependencyIt = configIt({
+  npm: Layer.mock(Npm.Service)({
+    install: (dir) => Effect.sync(() => dependencyInstallDirs.push(dir)).pipe(Effect.asVoid),
+  }),
+})
 
 const schemaConfig = (config: object) => ({ $schema: "https://opencode.ai/config.json", ...config })
 
@@ -948,11 +955,13 @@ it.effect("creates a missing OPENCODE_CONFIG_DIR", () =>
   }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(LayerNode.compile(CrossSpawnSpawner.node))),
 )
 
-it.effect("installs dependencies in writable OPENCODE_CONFIG_DIR", () =>
+dependencyIt.effect("installs dependencies only in directories that own plugins", () =>
   Effect.gen(function* () {
+    dependencyInstallDirs.length = 0
     const dir = yield* tmpdirScoped()
     const configDir = path.join(dir, "configdir")
-    yield* FSUtil.use.ensureDir(configDir)
+    yield* FSUtil.use.ensureDir(path.join(dir, ".opencode"))
+    yield* FSUtil.use.writeWithDirs(path.join(configDir, "plugin", "test.ts"), "export default {}\n")
 
     yield* withProcessEnv(
       "OPENCODE_CONFIG_DIR",
@@ -962,7 +971,7 @@ it.effect("installs dependencies in writable OPENCODE_CONFIG_DIR", () =>
       ),
     )
 
-    expect(yield* FSUtil.use.readFileString(path.join(configDir, ".gitignore"))).toContain("package-lock.json")
+    expect(dependencyInstallDirs).toEqual([configDir])
   }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(LayerNode.compile(CrossSpawnSpawner.node))),
 )
 
